@@ -51,8 +51,8 @@ type RunResult struct {
 func (t *TaskRunner) deleteTmpFiles(paths []string) {
 	for _, path := range paths {
 		// TODO: install a signal handler that deletes the
-		// file on termination. This ensures the temp. files are deleted if baur
-		// gets terminated.
+		// file on termination. This ensures the temp. files are
+		// deleted when baur gets terminated.
 		if err := os.Remove(path); err != nil {
 			// TODO: always log this, not only with debug priority
 			t.LogFn("deleting temporary task info file %q failed: %s\n", path, err)
@@ -123,6 +123,21 @@ func (t *TaskRunner) Run(task *Task) (*RunResult, error) {
 		StartTime: startTime,
 		StopTime:  time.Now(),
 	}, nil
+}
+
+// FIXME: move this to Inputs struct(?)
+func InputsToFSPaths(inputs []Input) []string {
+	var result []string
+
+	for _, in := range inputs {
+		f, ok := in.(*InputFile)
+		if !ok {
+			continue
+		}
+		result = append(result, f.AbsPath())
+	}
+
+	return result
 }
 
 func (t *TaskRunner) setSkipRuns(val uint32) {

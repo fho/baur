@@ -41,6 +41,10 @@ type Cmd struct {
 	stdout io.Writer
 	stderr io.Writer
 
+	// after the process was started extraData is copied to Filedescriptor
+	// 3 of the new process
+	extraData io.Reader
+
 	maxStoredErrBytesPerStream int
 
 	expectSuccess bool
@@ -105,6 +109,13 @@ func (c *Cmd) LogPrefix(prefix string) *Cmd {
 // Env defines environment variables that are set during execution.
 func (c *Cmd) Env(env []string) *Cmd {
 	c.env = env
+	return c
+}
+
+// ExtraData specifies an io.Reader that is read after the process is started
+// and written to file descriptor 3 of the new process.
+func (c *Cmd) ExtraData(r io.Reader) *Cmd {
+	c.extraData = r
 	return c
 }
 
@@ -180,11 +191,13 @@ func (c *Cmd) resolveDir(d string) string {
 	if d != "" {
 		return d
 	}
+
 	d, err := os.Getwd()
 	if err != nil {
 		c.logFn("WARN: determining current working directory failed: %s", err)
 		return ""
 	}
+
 	return d
 }
 
@@ -198,6 +211,21 @@ func (c *Cmd) Run(ctx context.Context) (*Result, error) {
 	cmd.WaitDelay = time.Minute
 	cmd.Dir = c.resolveDir(c.dir)
 	cmd.Env = c.env
+
+	// FIXME: THIS IS UGLY!:
+	var xtraWriter *os.File
+	if c.extraData != nil {
+		var xtraReader *os.File
+		var err error
+
+		xtraReader, xtraWriter, err = os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer xtraReader.Close()
+		// xtraWriter is closed without defer
+		cmd.ExtraFiles = []*os.File{xtraReader}
+	}
 
 	stdoutLogWriterCloseFn := func() error { return nil }
 	stderrLogWriterCloseFn := func() error { return nil }
@@ -224,6 +252,26 @@ func (c *Cmd) Run(ctx context.Context) (*Result, error) {
 	err := cmd.Start()
 	if err != nil {
 		return nil, errors.Join(err, stdoutLogWriterCloseFn(), stderrLogWriterCloseFn())
+	}
+
+	if c.extraData != nil {
+		err = xtraWriter.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		if err != nil {
+			c.logf("WARN: setting deadling on pipe failed: %s", err)
+		}
+
+		_, err = io.Copy(xtraWriter, c.extraData)
+		if err != nil {
+			err = fmt.Errorf("piping data to child process failed: %w", err)
+			killErr := cmd.Process.Kill()
+			if killErr != nil {
+				return nil, fmt.Errorf("%s, killing the child process (pid: %d) too: %s",
+					err, cmd.Process.Pid, killErr)
+			}
+
+			return nil, err
+		}
+		_ = xtraWriter.Close()
 	}
 
 	err = cmd.Wait()
